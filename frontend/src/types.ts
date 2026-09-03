@@ -47,3 +47,15 @@ export interface HitTestResult {
   screenX: number;
   screenY: number;
 }
+
+export interface BrowserItem {
+  id: number | string;
+  name: string;
+  meta?: number;
+  mod?: string;
+  oredict?: string[];
+  iconUrl?: string;
+}
+
+export type GuiScaleTier = "auto" | "compact" | "normal" | "large";
+
