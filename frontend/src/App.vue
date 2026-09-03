@@ -1,315 +1,522 @@
 <template>
-  <div class="app-layout">
-    <!-- Top Dark Industrial Header -->
-    <header class="app-header">
-      <div class="logo">
-        <span class="logo-accent">NEO</span>NEI
-        <span class="badge">NEXT</span>
-      </div>
-      <div class="search-bar">
-        <input
-          v-model="searchQuery"
-          type="text"
-          placeholder="搜索物品、配方、拼音、矿物词典或模组 (按下回车或直接键入)..."
+  <div class="nei-app-root" :class="{ 'mobile-mode': isMobile }">
+    <!-- Main Viewport -->
+    <div class="nei-viewport">
+      <!-- Left Rail (Collapsible) -->
+      <LeftRail
+        class="rail-left"
+        :mods="availableMods"
+        :selected-mod="selectedMod"
+        @select-mod="selectedMod = $event"
+        @reset-filters="resetFilters"
+        @open-settings="showScaleModal = true"
+      />
+
+      <!-- Center Stage (Empty State or Recipe Dock) -->
+      <main class="nei-center-stage">
+        <!-- Ambient Empty State (Minecraft Slate Texture) -->
+        <div v-if="!activeRecipeModalVisible" class="ambient-empty-state">
+          <div class="empty-watermark">
+            <span class="watermark-accent">NEO</span>NEI
+          </div>
+          <p class="empty-hint">在右侧面板点击物品查看合成（R）或用途（U）</p>
+
+          <div v-if="historyItems.length > 0" class="recent-chips-container">
+            <span class="chips-label">最近浏览:</span>
+            <div class="chips-row">
+              <button
+                v-for="chip in historyItems.slice(0, 5)"
+                :key="chip.id + ':' + (chip.meta ?? 0)"
+                class="chip-btn"
+                @click="openRecipeForItem(chip, false)"
+              >
+                {{ chip.name }}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Recipe Dock Modal (Classic In-Game Chassis) -->
+        <RecipeDockModal
+          v-else
+          :visible="activeRecipeModalVisible"
+          :current-recipe="currentModalRecipe"
+          :machine-categories="currentMachineCategories"
+          :selected-machine-index="selectedMachineIndex"
+          :current-recipe-index="currentCategoryRecipeIndex"
+          :total-recipes-in-category="recipesInCurrentCategory.length"
+          :can-go-back="historyStack.length > 1"
+          :can-go-forward="forwardStack.length > 0"
+          @close="closeRecipeDock"
+          @select-machine="onSelectMachine"
+          @prev-recipe="prevCategoryRecipe"
+          @next-recipe="nextCategoryRecipe"
+          @back="navigateHistoryBack"
+          @forward="navigateHistoryForward"
+          @slot-drill="handleSlotDrill"
         />
-      </div>
-      <div class="header-actions">
-        <span class="stat-pill">{{ recipes.length }} 配方</span>
-        <button class="action-btn" @click="addSampleRecipe">+ 添加模拟配方</button>
-      </div>
-    </header>
+      </main>
 
-    <!-- Main Native Surface Viewport -->
-    <main class="app-main">
-      <NativeSurface :recipes="filteredRecipes" />
-    </main>
+      <!-- Right Full-Spectrum Item Browser -->
+      <aside class="nei-right-browser">
+        <ItemBrowserPanel
+          :items="filteredItems"
+          :item-size="guiScale"
+          :selected-item-id="selectedItem ? String(selectedItem.id) : null"
+          @item-click="openRecipeForItem($event, false)"
+          @item-contextmenu="openRecipeForItem($event, true)"
+          @open-recipe="toggleRecipeModal"
+        >
+          <template #history>
+            <HistoryStrip
+              :items="historyItems"
+              @item-click="openRecipeForItem($event, false)"
+              @item-contextmenu="openRecipeForItem($event, true)"
+            />
+          </template>
+        </ItemBrowserPanel>
+      </aside>
+    </div>
 
-    <!-- Bottom Status Bar -->
-    <footer class="app-footer">
-      <div class="footer-status">
-        <span class="dot live"></span> 渲染内核: NativeSurface (WASM / 20Hz Timeline)
-      </div>
-      <div class="footer-info">
-        帧预算: 16.6ms | 槽位绝对定位: 激活 | 主线程状态: 零阻断 (60 FPS)
-      </div>
-    </footer>
+    <!-- Bottom Centered NEI Search Bar -->
+    <BottomSearchBar
+      ref="searchBarRef"
+      v-model="searchQuery"
+    />
+
+    <!-- GUI Scale Control Dialog -->
+    <GuiScaleControl
+      v-if="showScaleModal"
+      v-model="guiScale"
+      @close="showScaleModal = false"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from "vue";
-import type { Recipe } from "./types.js";
-import NativeSurface from "./components/NativeSurface.vue";
+import { ref, computed, onMounted, onBeforeUnmount } from "vue";
+import type { Recipe, Slot, BrowserItem } from "./types.js";
+import { filterItems } from "./surface/search-filter.js";
 
+import LeftRail from "./components/layout/LeftRail.vue";
+import BottomSearchBar from "./components/layout/BottomSearchBar.vue";
+import GuiScaleControl from "./components/layout/GuiScaleControl.vue";
+import ItemBrowserPanel from "./components/browser/ItemBrowserPanel.vue";
+import HistoryStrip from "./components/browser/HistoryStrip.vue";
+import RecipeDockModal from "./components/dock/RecipeDockModal.vue";
+
+// State
+const allRecipes = ref<Recipe[]>([]);
+const rawItems = ref<BrowserItem[]>([]);
+const historyItems = ref<BrowserItem[]>([]);
 const searchQuery = ref("");
+const selectedMod = ref("all");
+const selectedItem = ref<BrowserItem | null>(null);
+const searchBarRef = ref<InstanceType<typeof BottomSearchBar> | null>(null);
 
+// GUI Scale
+const loadSavedScale = (): number => {
+  try {
+    const saved = localStorage.getItem("neonei:guiScale");
+    return saved ? parseInt(saved, 10) : 44;
+  } catch {
+    return 44;
+  }
+};
+const guiScale = ref(loadSavedScale());
+const showScaleModal = ref(false);
+
+// Mobile Breakpoint Detection
+const isMobile = ref(window.innerWidth < 768);
+const onResize = () => {
+  isMobile.value = window.innerWidth < 768;
+};
+
+// Recipe Dock & Navigation
+const activeRecipeModalVisible = ref(false);
+const selectedMachineIndex = ref(0);
+const currentCategoryRecipeIndex = ref(0);
+
+interface HistoryState {
+  item: BrowserItem;
+  isUsage: boolean;
+}
+const historyStack = ref<HistoryState[]>([]);
+const forwardStack = ref<HistoryState[]>([]);
+
+// Data Fetching
 onMounted(async () => {
+  window.addEventListener("resize", onResize);
+  window.addEventListener("keydown", handleGlobalKeydown);
+
   try {
     const res = await fetch("/data/recipes/gregtech.json");
     if (res.ok) {
       const data = await res.json();
       if (Array.isArray(data) && data.length > 0) {
-        recipes.value = data;
+        allRecipes.value = data;
+        buildItemCatalog(data);
       }
     }
   } catch (err) {
-    console.warn("Failed to load live recipes, using defaults", err);
+    console.warn("Could not load /data/recipes/gregtech.json", err);
   }
 });
 
-// Initial sample recipes demonstrating absolute slot positioning & dynamic semantics
-const recipes = ref<Recipe[]>([
-  {
-    id: "gregtech:assembler:sample_circuit",
-    type: "gt.recipe.assembler",
-    label: "组装机: 基础电路板",
-    w: 220,
-    h: 100,
-    slots: [
-      { x: 18, y: 22, w: 18, h: 18, kind: "item", role: "in", items: [{ id: 1, name: "基础电路基板", count: 1 }] },
-      { x: 38, y: 22, w: 18, h: 18, kind: "item", role: "in", items: [{ id: 2, name: "红石合金线", count: 2 }] },
-      { x: 18, y: 42, w: 18, h: 18, kind: "item", role: "in", items: [{ id: 3, name: "电阻", count: 2 }] },
-      { x: 58, y: 22, w: 18, h: 48, kind: "fluid", role: "in", fluid: { id: "molten.soldering_alloy", amount: 144 } },
-      { x: 154, y: 32, w: 26, h: 26, kind: "item", role: "out", items: [{ id: 100, name: "电子电路", count: 1 }], chance: 1.0 }
-    ],
-    env: { tier: "LV", eut: 16, ticks: 200 }
-  },
-  {
-    id: "minecraft:crafting_table",
-    type: "minecraft.crafting",
-    label: "工作台: 合成台",
-    w: 190,
-    h: 90,
-    slots: [
-      { x: 18, y: 20, w: 18, h: 18, kind: "item", role: "in", items: [{ id: 5, name: "橡木木板", count: 1 }] },
-      { x: 38, y: 20, w: 18, h: 18, kind: "item", role: "in", items: [{ id: 5, name: "橡木木板", count: 1 }] },
-      { x: 18, y: 40, w: 18, h: 18, kind: "item", role: "in", items: [{ id: 5, name: "橡木木板", count: 1 }] },
-      { x: 38, y: 40, w: 18, h: 18, kind: "item", role: "in", items: [{ id: 5, name: "橡木木板", count: 1 }] },
-      { x: 134, y: 30, w: 26, h: 26, kind: "item", role: "out", items: [{ id: 58, name: "工作台", count: 1 }] }
-    ],
-    env: { eut: 0, ticks: 0 }
-  },
-  {
-    id: "gregtech:blast_furnace:aluminum",
-    type: "gt.recipe.blast_furnace",
-    label: "高炉: 铝矿提炼",
-    w: 220,
-    h: 100,
-    slots: [
-      { x: 18, y: 22, w: 18, h: 18, kind: "item", role: "in", items: [{ id: 12, name: "铝土矿粉", count: 2 }] },
-      { x: 58, y: 22, w: 18, h: 48, kind: "fluid", role: "in", fluid: { id: "gas.nitrogen", amount: 1000 } },
-      { x: 144, y: 22, w: 18, h: 18, kind: "item", role: "out", items: [{ id: 13, name: "铝锭", count: 1 }] },
-      { x: 164, y: 22, w: 18, h: 18, kind: "item", role: "out", items: [{ id: 14, name: "金矿副产粉", count: 1 }], chance: 0.25 }
-    ],
-    env: { tier: "MV", eut: 120, ticks: 1200 }
-  },
-  {
-    id: "ae2:inscriber:logic_processor",
-    type: "ae2.inscriber",
-    label: "压印机: 逻辑处理器",
-    w: 200,
-    h: 90,
-    slots: [
-      { x: 18, y: 15, w: 18, h: 18, kind: "item", role: "in", items: [{ id: 4100, name: "逻辑压印模板", count: 1 }] },
-      { x: 18, y: 35, w: 18, h: 18, kind: "item", role: "in", items: [{ id: 266, name: "金锭", count: 1 }] },
-      { x: 18, y: 55, w: 18, h: 18, kind: "item", role: "in", items: [{ id: 331, name: "红石粉", count: 1 }] },
-      { x: 134, y: 35, w: 26, h: 26, kind: "item", role: "out", items: [{ id: 4101, name: "逻辑处理器", count: 1 }] }
-    ],
-    env: { eut: 8, ticks: 100 }
-  },
-  {
-    id: "enderio:alloy:energetic_alloy",
-    type: "enderio.alloy_smelter",
-    label: "合金炉: 充能合金",
-    w: 210,
-    h: 95,
-    slots: [
-      { x: 18, y: 20, w: 18, h: 18, kind: "item", role: "in", items: [{ id: 266, name: "金锭", count: 1 }] },
-      { x: 38, y: 20, w: 18, h: 18, kind: "item", role: "in", items: [{ id: 331, name: "红石粉", count: 1 }] },
-      { x: 58, y: 20, w: 18, h: 18, kind: "item", role: "in", items: [{ id: 348, name: "荧石粉", count: 1 }] },
-      { x: 144, y: 28, w: 26, h: 26, kind: "item", role: "out", items: [{ id: 5001, name: "充能合金锭", count: 1 }] }
-    ],
-    env: { eut: 32, ticks: 100 }
-  },
-  {
-    id: "thaumcraft:crucible:nitor",
-    type: "thaumcraft.crucible",
-    label: "坩埚炼金: 闪耀之光",
-    w: 200,
-    h: 90,
-    slots: [
-      { x: 28, y: 34, w: 18, h: 18, kind: "item", role: "in", items: [{ id: 371, name: "萤石粉", count: 1 }] },
-      { x: 134, y: 30, w: 26, h: 26, kind: "item", role: "out", items: [{ id: 6001, name: "闪耀之光", count: 1 }] }
-    ],
-    env: { eut: 0, ticks: 40, special: { essentia: "Ignis 3, Lux 3, Potentia 3" } }
-  },
-  {
-    id: "botania:mana_pool:manasteel",
-    type: "botania.mana_infusion",
-    label: "魔力池: 魔力钢锭",
-    w: 200,
-    h: 90,
-    slots: [
-      { x: 28, y: 35, w: 18, h: 18, kind: "item", role: "in", items: [{ id: 265, name: "铁锭", count: 1 }] },
-      { x: 134, y: 30, w: 26, h: 26, kind: "item", role: "out", items: [{ id: 7001, name: "魔力钢锭", count: 1 }] }
-    ],
-    env: { eut: 0, ticks: 20, special: { mana: 3000 } }
-  }
-]);
-
-const filteredRecipes = computed(() => {
-  const q = searchQuery.value.trim().toLowerCase();
-  if (!q) return recipes.value;
-  return recipes.value.filter(
-    (r) =>
-      r.label?.toLowerCase().includes(q) ||
-      r.type.toLowerCase().includes(q) ||
-      r.slots.some((s) => s.items?.some((i) => i.name?.toLowerCase().includes(q)))
-  );
+onBeforeUnmount(() => {
+  window.removeEventListener("resize", onResize);
+  window.removeEventListener("keydown", handleGlobalKeydown);
 });
 
-function addSampleRecipe() {
-  const id = recipes.value.length + 1;
-  recipes.value.push({
-    id: `custom:recipe_${id}`,
-    type: "gt.recipe.chemical_reactor",
-    label: `反应釜配方 #${id}`,
-    w: 220,
-    h: 100,
-    slots: [
-      { x: 18, y: 22, w: 18, h: 18, kind: "item", role: "in", items: [{ id: 20 + id, name: `催化剂原料 #${id}`, count: 1 }] },
-      { x: 58, y: 22, w: 18, h: 48, kind: "fluid", role: "in", fluid: { id: "water", amount: 500 } },
-      { x: 144, y: 30, w: 26, h: 26, kind: "item", role: "out", items: [{ id: 100 + id, name: `纯化化合物 #${id}`, count: 2 }] }
-    ],
-    env: { tier: "HV", eut: 480, ticks: 300 }
-  });
+// Build catalog of unique items from recipes
+function buildItemCatalog(recipes: Recipe[]) {
+  const itemMap = new Map<string, BrowserItem>();
+
+  for (const r of recipes) {
+    const mod = r.id.split(":")[0] || "minecraft";
+    for (const s of r.slots) {
+      if (s.items && s.items.length > 0) {
+        for (const item of s.items) {
+          const key = `${item.id}:${item.meta ?? 0}`;
+          if (!itemMap.has(key)) {
+            itemMap.set(key, {
+              id: item.id,
+              meta: item.meta ?? 0,
+              name: item.name || `Item #${item.id}`,
+              mod: mod === "gt" ? "gregtech" : mod
+            });
+          }
+        }
+      }
+    }
+  }
+
+  rawItems.value = Array.from(itemMap.values());
+}
+
+// Available mods for filter
+const availableMods = computed(() => {
+  const modCount = new Map<string, number>();
+  for (const item of rawItems.value) {
+    const m = item.mod || "minecraft";
+    modCount.set(m, (modCount.get(m) || 0) + 1);
+  }
+  return Array.from(modCount.entries()).map(([modId, itemCount]) => ({
+    modId,
+    modName: modId === "gregtech" ? "GregTech 5U" : modId.toUpperCase(),
+    itemCount
+  }));
+});
+
+// Filtered items
+const filteredItems = computed(() => {
+  let list = rawItems.value;
+  if (selectedMod.value !== "all") {
+    list = list.filter((i) => i.mod === selectedMod.value);
+  }
+  return filterItems(list, searchQuery.value);
+});
+
+// Recipe Dock Logic
+function openRecipeForItem(item: BrowserItem, isUsage: boolean, pushHistory = true) {
+  selectedItem.value = item;
+  activeRecipeModalVisible.value = true;
+  selectedMachineIndex.value = 0;
+  currentCategoryRecipeIndex.value = 0;
+
+  // Add to recent viewed items strip
+  if (!historyItems.value.some((h) => h.id === item.id && h.meta === item.meta)) {
+    historyItems.value.unshift(item);
+    if (historyItems.value.length > 8) historyItems.value.pop();
+  }
+
+  if (pushHistory) {
+    historyStack.value.push({ item, isUsage });
+    forwardStack.value = [];
+  }
+}
+
+// Machine categories for currently selected item
+const currentMachineCategories = computed(() => {
+  if (!selectedItem.value) return [];
+  const targetId = selectedItem.value.id;
+  const targetMeta = selectedItem.value.meta ?? 0;
+
+  const catMap = new Map<string, Recipe[]>();
+  for (const r of allRecipes.value) {
+    const matches = r.slots.some((s) =>
+      s.items?.some((i) => i.id === targetId && (i.meta === undefined || i.meta === targetMeta))
+    );
+    if (matches) {
+      const type = r.type || "default";
+      if (!catMap.has(type)) catMap.set(type, []);
+      catMap.get(type)!.push(r);
+    }
+  }
+
+  // Fallback: If no exact matching recipes, show all recipes
+  if (catMap.size === 0 && allRecipes.value.length > 0) {
+    catMap.set("gt.recipe.assembler", allRecipes.value.slice(0, 10));
+  }
+
+  return Array.from(catMap.entries()).map(([type, recipes]) => ({
+    id: type,
+    label: formatMachineLabel(type),
+    count: recipes.length,
+    recipes
+  }));
+});
+
+function formatMachineLabel(type: string): string {
+  if (type.includes("assembler")) return "组装机";
+  if (type.includes("blast_furnace")) return "高炉";
+  if (type.includes("chemical")) return "化学反应釜";
+  return type.replace("gt.recipe.", "");
+}
+
+const recipesInCurrentCategory = computed(() => {
+  const cats = currentMachineCategories.value;
+  if (!cats || cats.length === 0) return [];
+  const cat = cats[selectedMachineIndex.value] || cats[0];
+  return cat ? cat.recipes : [];
+});
+
+const currentModalRecipe = computed(() => {
+  const list = recipesInCurrentCategory.value;
+  if (!list || list.length === 0) return null;
+  return list[currentCategoryRecipeIndex.value] || list[0] || null;
+});
+
+function onSelectMachine(idx: number) {
+  selectedMachineIndex.value = idx;
+  currentCategoryRecipeIndex.value = 0;
+}
+
+function prevCategoryRecipe() {
+  if (currentCategoryRecipeIndex.value > 0) {
+    currentCategoryRecipeIndex.value--;
+  }
+}
+
+function nextCategoryRecipe() {
+  if (currentCategoryRecipeIndex.value < recipesInCurrentCategory.value.length - 1) {
+    currentCategoryRecipeIndex.value++;
+  }
+}
+
+function closeRecipeDock() {
+  activeRecipeModalVisible.value = false;
+}
+
+function toggleRecipeModal() {
+  if (activeRecipeModalVisible.value) {
+    closeRecipeDock();
+  } else if (rawItems.value.length > 0) {
+    openRecipeForItem(rawItems.value[0], false);
+  }
+}
+
+function handleSlotDrill(slot: Slot, isUsage: boolean) {
+  if (slot.items && slot.items.length > 0) {
+    const item = slot.items[0];
+    openRecipeForItem({
+      id: item.id,
+      meta: item.meta ?? 0,
+      name: item.name || `Item #${item.id}`
+    }, isUsage);
+  }
+}
+
+function navigateHistoryBack() {
+  if (historyStack.value.length > 1) {
+    const current = historyStack.value.pop()!;
+    forwardStack.value.push(current);
+    const prev = historyStack.value[historyStack.value.length - 1];
+    openRecipeForItem(prev.item, prev.isUsage, false);
+  }
+}
+
+function navigateHistoryForward() {
+  if (forwardStack.value.length > 0) {
+    const next = forwardStack.value.pop()!;
+    historyStack.value.push(next);
+    openRecipeForItem(next.item, next.isUsage, false);
+  }
+}
+
+function resetFilters() {
+  selectedMod.value = "all";
+  searchQuery.value = "";
+}
+
+// Global hotkeys
+function handleGlobalKeydown(e: KeyboardEvent) {
+  if (e.key === "Escape") {
+    if (activeRecipeModalVisible.value) {
+      closeRecipeDock();
+    } else if (searchQuery.value) {
+      searchQuery.value = "";
+    }
+  } else if (e.key === "Backspace" && !isInputActive()) {
+    e.preventDefault();
+    navigateHistoryBack();
+  } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
+    e.preventDefault();
+    searchBarRef.value?.focus();
+  }
+}
+
+function isInputActive(): boolean {
+  const active = document.activeElement;
+  return active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement;
 }
 </script>
 
 <style scoped>
-.app-layout {
+.nei-app-root {
   display: flex;
   flex-direction: column;
   width: 100vw;
   height: 100vh;
-  background-color: #0d1117;
+  background: #0D1117;
+  color: #F0F6FC;
   overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 }
 
-.app-header {
-  height: 48px;
-  background-color: #161b22;
-  border-bottom: 1px solid #21262d;
+.nei-viewport {
   display: flex;
-  align-items: center;
-  padding: 0 16px;
-  gap: 16px;
-}
-
-.logo {
-  font-weight: 800;
-  font-size: 16px;
-  letter-spacing: 1px;
-  color: #c9d1d9;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.logo-accent {
-  color: #58a6ff;
-}
-
-.badge {
-  font-size: 9px;
-  font-weight: 700;
-  background-color: #238636;
-  color: #ffffff;
-  padding: 2px 6px;
-  border-radius: 10px;
-}
-
-.search-bar {
   flex: 1;
-}
-
-.search-bar input {
   width: 100%;
-  max-width: 600px;
-  height: 30px;
-  background-color: #0d1117;
-  border: 1px solid #30363d;
-  border-radius: 6px;
-  padding: 0 12px;
-  color: #c9d1d9;
-  font-size: 13px;
-  outline: none;
-  transition: border-color 0.2s;
+  height: calc(100vh - 44px);
+  overflow: hidden;
+  position: relative;
 }
 
-.search-bar input:focus {
-  border-color: #58a6ff;
-}
-
-.header-actions {
+.nei-center-stage {
+  flex: 1;
   display: flex;
   align-items: center;
-  gap: 10px;
-}
-
-.stat-pill {
-  font-size: 12px;
-  color: #8b949e;
-  background-color: #21262d;
-  padding: 4px 10px;
-  border-radius: 12px;
-}
-
-.action-btn {
-  background-color: #21262d;
-  border: 1px solid #30363d;
-  color: #c9d1d9;
-  border-radius: 6px;
-  padding: 5px 12px;
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background-color 0.2s;
-}
-
-.action-btn:hover {
-  background-color: #30363d;
-}
-
-.app-main {
-  flex: 1;
+  justify-content: center;
+  background: radial-gradient(circle at center, #161B22 0%, #0D1117 100%);
   position: relative;
   overflow: hidden;
 }
 
-.app-footer {
-  height: 28px;
-  background-color: #161b22;
-  border-top: 1px solid #21262d;
+.ambient-empty-state {
   display: flex;
+  flex-direction: column;
   align-items: center;
-  justify-content: space-between;
-  padding: 0 16px;
-  font-size: 11px;
-  color: #8b949e;
+  justify-content: center;
+  user-select: none;
+  opacity: 0.85;
 }
 
-.footer-status {
+.empty-watermark {
+  font-size: 56px;
+  font-weight: 900;
+  letter-spacing: 4px;
+  color: #21262D;
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+.watermark-accent {
+  color: #58A6FF;
+  opacity: 0.4;
+}
+
+.empty-hint {
+  font-size: 13px;
+  color: #484F58;
+  margin-top: 10px;
+  letter-spacing: 0.5px;
+}
+
+.recent-chips-container {
   display: flex;
   align-items: center;
+  gap: 8px;
+  margin-top: 24px;
+}
+
+.chips-label {
+  font-size: 11px;
+  color: #484F58;
+}
+
+.chips-row {
+  display: flex;
   gap: 6px;
 }
 
-.dot.live {
-  width: 6px;
-  height: 6px;
-  background-color: #3fb950;
-  border-radius: 50%;
-  display: inline-block;
+.chip-btn {
+  background: #161B22;
+  border: 1px solid #30363D;
+  color: #8B949E;
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.chip-btn:hover {
+  border-color: #58A6FF;
+  color: #F0F6FC;
+  background: #21262D;
+}
+
+.nei-right-browser {
+  width: 380px;
+  min-width: 280px;
+  max-width: 520px;
+  height: 100%;
+}
+
+/* Tablet Layout (768px ~ 1279px) */
+@media (max-width: 1279px) {
+  .nei-right-browser {
+    width: 340px;
+  }
+}
+
+/* Mobile Layout (< 768px) */
+@media (max-width: 767px) {
+  .nei-viewport {
+    flex-direction: column;
+  }
+
+  .rail-left {
+    display: none;
+  }
+
+  .nei-right-browser {
+    width: 100%;
+    max-width: 100%;
+    flex: 1;
+  }
+
+  /* Bottom Sheet Overlay on Mobile */
+  .nei-center-stage {
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+    pointer-events: none;
+    background: transparent;
+  }
+
+  .recipe-dock-container {
+    pointer-events: auto;
+    align-items: flex-end !important;
+    padding: 0 !important;
+    background: rgba(0, 0, 0, 0.7);
+  }
+
+  .recipe-dock-chassis {
+    border-radius: 16px 16px 0 0 !important;
+    max-height: 80vh !important;
+    width: 100% !important;
+    max-width: 100% !important;
+  }
 }
 </style>
