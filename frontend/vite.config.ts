@@ -1,10 +1,85 @@
-import { defineConfig } from "vite";
-import vue from "@vitejs/plugin-vue";
+import { defineConfig, loadEnv } from 'vite'
+import vue from '@vitejs/plugin-vue'
 
-export default defineConfig({
-  plugins: [vue()],
-  server: {
-    port: 5173,
-    host: "127.0.0.1"
+// https://vite.dev/config/
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), '')
+  const devProxyTarget = env.VITE_DEV_PROXY_TARGET || 'http://127.0.0.1:3002'
+  const normalizeBaseUrl = (value: string) => {
+    if (!value) return ''
+    if (value === '/') return ''
+    return value.replace(/\/+$/, '')
   }
-});
+  const backendBaseUrl = normalizeBaseUrl(
+    env.VITE_BACKEND_BASE_URL || (mode === 'development' ? devProxyTarget : '')
+  )
+  const apiBaseUrl = normalizeBaseUrl(env.VITE_API_BASE_URL || '/api')
+  const productionRuntimeDefault = mode === 'development' ? '0' : '1'
+  const publicRuntimeOnly = env.VITE_PUBLIC_RUNTIME_ONLY || productionRuntimeDefault
+  const disableControlPlane = env.VITE_RUNTIME_DISABLE_CONTROL_PLANE || productionRuntimeDefault
+  const strictRuntimeContracts = env.VITE_STRICT_RUNTIME_CONTRACTS || productionRuntimeDefault
+
+  const forbidLegacyImports = {
+    name: 'forbid-legacy-imports',
+    enforce: 'pre' as const,
+    resolveId(source: string, importer?: string) {
+      if (!importer || !importer.includes('/src/')) return null
+      if (!source.includes('components/legacy')) return null
+      throw new Error(
+        `[legacy-import-guard] Legacy imports are forbidden in production code: "${source}" from "${importer}"`
+      )
+    }
+  }
+
+  return {
+    plugins: [vue(), forbidLegacyImports],
+    define: {
+      __BACKEND_BASE_URL__: JSON.stringify(backendBaseUrl),
+      __API_BASE_URL__: JSON.stringify(apiBaseUrl),
+      'import.meta.env.VITE_PUBLIC_RUNTIME_ONLY': JSON.stringify(publicRuntimeOnly),
+      'import.meta.env.VITE_RUNTIME_DISABLE_CONTROL_PLANE': JSON.stringify(disableControlPlane),
+      'import.meta.env.VITE_NEONEI_ADMIN_TOKEN': JSON.stringify(env.VITE_NEONEI_ADMIN_TOKEN || ''),
+      'import.meta.env.VITE_STRICT_RUNTIME_CONTRACTS': JSON.stringify(strictRuntimeContracts),
+    },
+    server: {
+      host: '127.0.0.1',
+      port: 5173,
+      proxy: {
+        '/api/images': {
+          target: devProxyTarget,
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/api\/images/, '/images'),
+        },
+        '/api': {
+          target: devProxyTarget,
+          changeOrigin: true,
+        },
+        '^/runtime(?:/|$)': {
+          target: devProxyTarget,
+          changeOrigin: true,
+        },
+        '^/ops(?:/|$)': {
+          target: devProxyTarget,
+          changeOrigin: true,
+        },
+      },
+    },
+    build: {
+      chunkSizeWarningLimit: 800,
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            if (!id.includes('node_modules')) return undefined
+            if (id.includes('vue') || id.includes('vue-router') || id.includes('pinia')) {
+              return 'vendor-vue'
+            }
+            if (id.includes('axios')) {
+              return 'vendor-utils'
+            }
+            return 'vendor'
+          }
+        }
+      }
+    }
+  }
+})
