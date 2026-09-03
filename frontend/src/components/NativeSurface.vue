@@ -1,5 +1,5 @@
 <template>
-  <div class="surface-viewport" ref="viewportRef" @mousemove="onMouseMove" @mouseleave="onMouseLeave">
+  <div class="surface-viewport" ref="viewportRef" @mousemove="onMouseMove" @mouseleave="onMouseLeave" @click="onClick" @contextmenu.prevent="onClick">
     <canvas ref="canvasRef"></canvas>
     <RecipeTooltip :hit="activeHit" :visible="isTooltipVisible" />
   </div>
@@ -7,7 +7,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from "vue";
-import type { Recipe, HitTestResult } from "../types.js";
+import type { Recipe, Slot, HitTestResult } from "../types.js";
 import { hitTestRecipe } from "../surface/hit-test.js";
 import { timeline } from "../surface/timeline.js";
 import { drawRecipe } from "../surface/surface-renderer.js";
@@ -15,6 +15,10 @@ import RecipeTooltip from "./RecipeTooltip.vue";
 
 const props = defineProps<{
   recipes: Recipe[];
+}>();
+
+const emit = defineEmits<{
+  (e: "slot-click", slot: Slot, event: MouseEvent): void;
 }>();
 
 const viewportRef = ref<HTMLDivElement | null>(null);
@@ -113,6 +117,12 @@ function onMouseMove(e: MouseEvent) {
 function onMouseLeave() {
   activeHit.value = null;
   isTooltipVisible.value = false;
+}
+
+function onClick(e: MouseEvent) {
+  if (activeHit.value) {
+    emit("slot-click", activeHit.value.slot, e);
+  }
 }
 
 onMounted(() => {
