@@ -37,11 +37,25 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from "vue";
+import { ref, computed, onMounted } from "vue";
 import type { Recipe } from "./types.js";
 import NativeSurface from "./components/NativeSurface.vue";
 
 const searchQuery = ref("");
+
+onMounted(async () => {
+  try {
+    const res = await fetch("/data/recipes/gregtech.json");
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data) && data.length > 0) {
+        recipes.value = data;
+      }
+    }
+  } catch (err) {
+    console.warn("Failed to load live recipes, using defaults", err);
+  }
+});
 
 // Initial sample recipes demonstrating absolute slot positioning & dynamic semantics
 const recipes = ref<Recipe[]>([
